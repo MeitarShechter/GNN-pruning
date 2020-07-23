@@ -3,7 +3,7 @@ import torchvision.transforms as transforms
 from torchvision.datasets.mnist import MNIST
 from torchvision.datasets.cifar import CIFAR10
 
-from modules import LeNet5, Masked_LeNet5, Pruned_LeNet5, resnet50, masked_resnet50, pruned_resnet50
+from modules import LeNet5, Masked_LeNet5, Pruned_LeNet5, resnet50, masked_resnet50, pruned_resnet50, WRN_40_2, Masked_WRN_40_2, Pruned_WRN_40_2
 from users_functions import *
 # from modules import ResNeXt29_2x64d
 
@@ -57,7 +57,8 @@ networks_data = {
         'dataset_name' : 'mnist',
         'create_graph_func' : LeNet5CreateNameGraph,
         'update_pruned_net_func' : LeNet5UpdatePrunedNet,
-        'trained_GNN_path': './GNN_model/extra_confidence_GNNPrunningNet.pt'
+        'trained_GNN_path': './GNN_model/test_GNNPrunningNet.pt',
+        'orig_net_loss': 1.2405669622239657e-05
     },
     'resnet50': {
         'network' : resnet50,
@@ -69,7 +70,20 @@ networks_data = {
         'dataset_name' : 'cifar10',
         'create_graph_func' : resnset50CreateNameGraph,
         'update_pruned_net_func' : resnet50UpdatePrunedNet,
-        'trained_GNN_path': './GNN_model/extra_confidence_GNNPrunningNet_resnet50.pt'
+        'trained_GNN_path': './GNN_model/extra_confidence_GNNPrunningNet_resnet50.pt',
+        'orig_net_loss': 1.2405669622239657e-05
+    },
+    'WRN_40_2': {
+        'network' : WRN_40_2,
+        'masked_network' : Masked_WRN_40_2,
+        'pruned_network' : Pruned_WRN_40_2,
+        'root' : './CIFAR10_models/',
+        'graph_path' : './CIFAR10_models/raw/WRN_40_2_graph.pt',
+        'sd_path' : './CIFAR10_models/WRN_40_2.pt',
+        'dataset_name' : 'cifar10',
+        'create_graph_func' : WRN_40_2CreateNameGraph,
+        'update_pruned_net_func' : WRN_40_2UpdatePrunedNet,
+        'trained_GNN_path': './GNN_model/GNNPrunningNet_WRN_40_2.pt',
+        'orig_net_loss': 8.07419783086516e-05
     }
 }
-    # 'resnext' : ResNeXt29_2x64d,

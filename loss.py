@@ -1,7 +1,9 @@
 import torch
 import torch.nn as nn
+from torch.autograd import Variable
 
 from users_definitions import networks_data
+from modules import ElemWiseMultiply
 
 '''
 This file:
@@ -13,87 +15,96 @@ This file:
 ### Building the loss ###
 #########################
 
-def GNN_prune_loss(params_scores, orig_net, network_name, val_data, reduction=None, prune_factor=0.5, gamma1=3e5, gamma2=1, gamma3=1e2):
-    prune_th = 0.5 # prune_th, _ = torch.kthvalue(params_scores, torch.ceil(prune_factor*params_scores.numel()))
-    params_mask = (params_scores >= prune_th)
+def GNN_prune_loss(params_scores, orig_net, orig_net_loss, network_name, val_data, device, reduction=None, prune_factor=0.5, gamma1=1, gamma2=1, gamma3=1e2):
+    ### first calculate the sparse term ###
+    # sparse_term = gamma2 * torch.log2((1 / (torch.log2(params_scores.numel()/(torch.sum(params_scores) + 1e-6)) + 1e-6)))
+    sparse_term = gamma2 * torch.log2(torch.sum(params_scores) + 1e-6)
+    # sparse_term_v = 1/sparse_term.item()
 
-    val_data_loader = torch.utils.data.DataLoader(val_data, batch_size=1024, shuffle=False, num_workers=8) 
-
-    ### build a new network based on params_mask ###
-    # new_net = Masked_LeNet5(params_mask) # We need to make the network differentiable as a function of the mask 
-    # new_net = Masked_LeNet5(params_scores)
-    new_net = networks_data.get(network_name).get('masked_network')(params_scores)
+    batch_size = 8
+    val_data_loader = torch.utils.data.DataLoader(val_data, batch_size=batch_size, shuffle=True, num_workers=8) 
+    new_net = networks_data.get(network_name).get('masked_network')(params_scores, device).to(device)
 
     model_dict = new_net.state_dict()
     pretrained_dict = orig_net.state_dict()    
 
     model_dict.update(pretrained_dict) 
 
-    # for idx, layer_n in enumerate(pretrained_dict):
-    #     if 'bias' in layer_n:
-    #         continue
+    new_net.load_state_dict(model_dict)  
 
-    #     if layer_n == 'convnet.c1.weight':
-    #         indices = np.where(params_mask[:6])[0]
-    #     elif layer_n == 'convnet.c3.weight':
-    #         indices = np.where(params_mask[6:6+16])[0] 
-    #     elif layer_n == 'convnet.c5.weight':
-    #         indices = np.where(params_mask[6+16:6+16+120])[0] 
-    #     elif layer_n == 'fc.f6.weight':
-    #         indices = np.where(params_mask[6+16+120:6+16+120+84])[0] 
-    #     elif layer_n == 'fc.f7.weight':
-    #         indices = list(range(0, 11))
+    ### train the new network a bit ###
+    new_net.train()
+    # don't train the masks
+    for m in new_net.modules():
+        if isinstance(m, ElemWiseMultiply):
+            m.mask.requires_grad = False
+
+    optimizer = torch.optim.SGD(new_net.parameters(), lr=0.02, momentum=0.9, nesterov=True, weight_decay=5e-4)
+    criterion = nn.CrossEntropyLoss()
+
+    for e in range(3):
+        for i, (images, labels) in enumerate(val_data_loader):
+            images, labels = images.to(device), labels.to(device)
+            optimizer.zero_grad()
+            output = new_net(images)
+            loss = criterion(output, labels)
+
+            if i % 100 == 0:
+                print('Retrain - Epoch %d, Batch: %d, Loss: %f' % (e, i, loss.detach().cpu().item()))
         
-    #     model_dict[layer_n] = pretrained_dict[layer_n][idices,:,:]
+            loss.backward()
+            optimizer.step()
 
-    #     bias_n = layer_n.replace('weight', 'bias')
-    #     model_dict[bias_n] = pretrained_dict[bias_n][indices] 
-
-    new_net.load_state_dict(model_dict)
-
-
+    for m in new_net.modules():
+        if isinstance(m, ElemWiseMultiply):
+            m.mask.requires_grad = True
 
     ### calculate the new network's loss ###
     new_net.eval()
-    total_correct = 0
     avg_loss = 0.0
+    acc_loss = 0.0
     criterion = nn.CrossEntropyLoss()
 
+    num_b = 0
+    acc_data_grad = torch.zeros_like(params_scores)
+
     for i, (images, labels) in enumerate(val_data_loader):
+        images, labels = images.to(device), labels.to(device)
+        new_net.zero_grad()
         output = new_net(images)
-        avg_loss += criterion(output, labels).sum()
-        pred = output.detach().max(1)[1]
-        total_correct += pred.eq(labels.view_as(pred)).sum()
+        loss = criterion(output, labels)
 
-    avg_loss /= len(val_data)
+        avg_loss += loss.sum()      
+        # loss = gamma1 * torch.log2(loss/orig_net_loss)
+        loss = gamma1 * loss
+        acc_loss += loss.sum()
+        # loss *= sparse_term_v        
+        loss.backward()
+
+        # get all the gradients with respect to mask
+        indToSum = {}
+        for m in new_net.modules():
+            if isinstance(m, ElemWiseMultiply):
+                nf = m.mask.grad.data.size()[1]
+                ind = m.indices_list
+                for i in range(nf):
+                    s = torch.sum(m.mask.grad.data[:, i, :, :])
+                    indToSum[ind[i]] = s
+        # add those gradients the rest
+        for i in range(len(params_scores)):
+            acc_data_grad[i] += indToSum[i]
+
+        num_b += 1
+        if num_b == 4000:
+          break
+
+    # avg_loss /= len(val_data)
+    avg_loss /= (batch_size*num_b)
+    acc_loss /= (batch_size*num_b)
+
     new_net_loss = avg_loss
+    data_term = acc_loss
+    print("The data_term in the loss is: {}".format(data_term))
+    print("The sparse_term in the loss is: {}".format(sparse_term))
 
-    ### calcualte original model loss ###
-    orig_net.eval()
-    total_correct = 0
-    avg_loss = 0.0
-    with torch.no_grad():
-        for i, (images, labels) in enumerate(val_data_loader):
-            output = orig_net(images)
-            avg_loss += criterion(output, labels).sum()
-            pred = output.detach().max(1)[1]
-            total_correct += pred.eq(labels.view_as(pred)).sum()
-
-    avg_loss /= len(val_data)
-    orig_net_loss = avg_loss
-
-    ### calculate all of the loss terms
-    loss_diff = new_net_loss - orig_net_loss
-
-    data_term = torch.mean(loss_diff * torch.abs(params_scores - 0.5))
-    sparse_term = torch.norm(params_scores, 1)
-    confidence_term = torch.mean(0.5 - torch.abs(params_scores - 0.5))
-
-    print("The loss_diff is: {}".format(loss_diff))
-    print("The data_term in the loss is: {}".format(gamma1*data_term))
-    print("The sparse_term in the loss is: {}".format(gamma2*sparse_term))
-    print("The confidence_term in the loss is: {}".format(gamma3*confidence_term))
-
-    loss = gamma1 * data_term + gamma2 * sparse_term + gamma3 * confidence_term
-
-    return loss
+    return sparse_term, data_term, acc_data_grad

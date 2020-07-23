@@ -20,13 +20,14 @@ This file:
 ############################
 
 class GraphDataset(InMemoryDataset):
-    def __init__(self, root, network_name, graph_path=None, transform=None, pre_transform=None):
-        super(GraphDataset, self).__init__(root, transform, pre_transform)
+    def __init__(self, root, network_name, isWRN=False, graph_path=None, transform=None, pre_transform=None):
         self.network_name = network_name
+        self.isWRN = isWRN
         if graph_path is None:
             self.graph_path = networks_data.get(network_name).get('graph_path') 
         else:
             self.graph_path = graph_path
+        super(GraphDataset, self).__init__(root, transform, pre_transform)
         self.data, self.slices = torch.load(self.processed_paths[0])
 
     @property
@@ -34,21 +35,10 @@ class GraphDataset(InMemoryDataset):
         raw_file_name = os.path.basename(self.graph_path)
         return [raw_file_name]
 
-        # if self.network_name == 'LeNet5':
-            # return ['new_LeNet5_graph.pt']
-        # elif self.network_name == 'resnet50':
-            # return ['resnet50_graph.pt']
-
     @property
     def processed_file_names(self):
         raw_file_name = os.path.basename(self.graph_path)
         return [raw_file_name.replace('.pt', '_processed.dataset')]
-
-        # if self.network_name == 'LeNet5':
-            # return ['new_LeNet5_graph_processed.dataset']
-        # elif self.network_name == 'resnet50':
-            # return ['resnet50_graph_processed.dataset']
-        # return ['training.pt', 'test.pt']
 
     def download(self):
         net_name_graph = convertModelToGraph(self.network_name)
@@ -67,10 +57,41 @@ class GraphDataset(InMemoryDataset):
             nodes = set(network_graph)
             nodes_dict = {}
 
-            for i, node in enumerate(nodes):
-                node_stat = network_graph.nodes[node]['stat']
-                x[i, :] = node_stat
-                nodes_dict[node] = i
+            if self.isWRN:
+                counter = 0
+                for i in range(16):
+                    node = 'conv1.weight_c{}'.format(i)
+                    node_stat = network_graph.nodes[node]['stat']
+                    x[counter, :] = node_stat
+                    nodes_dict[node] = counter
+
+                    counter += 1
+
+                planes = [32, 64, 128]
+                for layer in range(1,4):
+                    for block in range(6):
+                        for conv in range(1,3):
+                            for j in range(planes[layer-1]):
+                                node = 'layer{}.{}.conv{}.weight_c{}'.format(layer, block, conv, j)
+                                node_stat = network_graph.nodes[node]['stat']
+                                x[counter, :] = node_stat
+                                nodes_dict[node] = counter
+
+                                counter +=1
+
+                        if block == 0:
+                            for j in range(planes[layer-1]):
+                                node = 'layer{}.0.shortcut.0.weight_c{}'.format(layer, j)
+                                node_stat = network_graph.nodes[node]['stat']
+                                x[counter, :] = node_stat
+                                nodes_dict[node] = counter
+
+                                counter +=1
+            else:
+                for i, node in enumerate(nodes):
+                    node_stat = network_graph.nodes[node]['stat']
+                    x[i, :] = node_stat
+                    nodes_dict[node] = i
 
             edge_index = torch.zeros([2, len(nx.edges(network_graph))], dtype=torch.long)
             edge_c = 0
